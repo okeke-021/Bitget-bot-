@@ -12,7 +12,7 @@ Automated 24/7 cryptocurrency futures trading bot.
 - BITGET_API_SECRET
 - BITGET_PASSPHRASE
 - TRADING_SYMBOL (default: BTC/USDT:USDT)
-- RISK_PERCENTAGE (default: 5)
+- RISK_PERCENTAGE (default: 10)
 ```
 
 ---
