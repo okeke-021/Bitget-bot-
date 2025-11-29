@@ -684,16 +684,26 @@ def update_dashboard(n_intervals, bot_state):
         current_price = signal['price']
         balance = bot_instance.get_account_balance()
         
-        # Trading logic
+        # Trading logic with detailed logging
         if bot_instance.position:
+            logger.info(f"Active position: {bot_instance.position['side']} at ${bot_instance.position['entry_price']:.2f}")
             should_close, reason = bot_instance.check_exit_conditions(df, current_price)
+            logger.info(f"Exit check: {should_close} - {reason}")
             if should_close:
                 success, message = bot_instance.close_position(current_price, reason)
-                logger.info(message)
+                logger.info(f"Close result: {message}")
         else:
+            logger.info(f"No position. Checking for entry signal...")
+            logger.info(f"Signal: {signal['action']} | Confidence: {signal['confidence']}% | "
+                       f"Trend: {signal['trend_score']} | Momentum: {signal['momentum_score']} | "
+                       f"Volume: {signal['volume_score']} | Total: {signal['total_score']}")
+            
             if signal['action'] in ['BUY', 'SELL'] and signal['confidence'] >= 65:
+                logger.info(f"✅ Entry conditions met! Attempting to open {signal['action']} position...")
                 success, message = bot_instance.open_position(signal)
-                logger.info(message)
+                logger.info(f"Open result: Success={success} | {message}")
+            else:
+                logger.info(f"⏸️ No entry: Signal={signal['action']}, Confidence={signal['confidence']}% (need 30%+)")
         
         # Create chart
         fig = make_subplots(
