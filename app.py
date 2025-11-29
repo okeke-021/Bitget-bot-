@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class BitgetFuturesBot:
-    def __init__(self, api_key, api_secret, passphrase, symbol, risk_percentage, margin_mode='cross'):
+    def __init__(self, api_key, api_secret, passphrase, symbol, risk_percentage, margin_mode='cross', leverage=10):
         try:
             self.exchange = ccxt.bitget({
                 'apiKey': api_key,
@@ -40,6 +40,7 @@ class BitgetFuturesBot:
             self.symbol = symbol
             self.risk_percentage = risk_percentage
             self.margin_mode = margin_mode
+            self.leverage = leverage
             self.position = None
             self.trades_history = []
             self.total_profit = 0
@@ -47,7 +48,15 @@ class BitgetFuturesBot:
             
             # Test connection
             self.exchange.fetch_balance()
-            logger.info(f"Bot initialized successfully for {symbol}")
+            
+            # Set leverage for the symbol
+            try:
+                self.exchange.set_leverage(self.leverage, self.symbol)
+                logger.info(f"Leverage set to {self.leverage}x for {self.symbol}")
+            except Exception as e:
+                logger.warning(f"Could not set leverage: {e}")
+            
+            logger.info(f"Bot initialized: {symbol} | {risk_percentage}% risk | {leverage}x leverage | {margin_mode} margin")
             
         except Exception as e:
             logger.error(f"Bot initialization error: {e}")
@@ -187,7 +196,7 @@ class BitgetFuturesBot:
             return 0
     
     def generate_signal(self, df):
-        """Generate trading signal"""
+        """Generate trading signal - ALWAYS returns BUY or SELL, never HOLD"""
         try:
             trend_score = self.analyze_trend(df)
             momentum_score = self.analyze_momentum(df)
@@ -196,9 +205,27 @@ class BitgetFuturesBot:
             total_score = trend_score + momentum_score + volume_score
             latest = df.iloc[-1]
             
+            # Determine direction based on total score
+            # Positive = BUY, Negative/Zero = SELL
+            if total_score > 0:
+                action = 'BUY'
+                confidence = min(abs(total_score) * 10 + 50, 95)
+            else:
+                action = 'SELL'
+                confidence = min(abs(total_score) * 10 + 50, 95)
+            
+            # If score is exactly 0, use RSI to decide
+            if total_score == 0:
+                if latest['rsi'] < 50:
+                    action = 'BUY'
+                    confidence = 50
+                else:
+                    action = 'SELL'
+                    confidence = 50
+            
             signal = {
-                'action': 'HOLD',
-                'confidence': 0,
+                'action': action,
+                'confidence': confidence,
                 'trend_score': trend_score,
                 'momentum_score': momentum_score,
                 'volume_score': volume_score,
@@ -208,22 +235,13 @@ class BitgetFuturesBot:
                 'atr_pct': latest['atr_pct']
             }
             
-            # Buy signal
-            if total_score >= 4 and latest['rsi'] < 70 and volume_score > 0:
-                signal['action'] = 'BUY'
-                signal['confidence'] = min(total_score * 10, 95)
-            
-            # Sell signal
-            elif total_score <= -4 and latest['rsi'] > 30 and volume_score > 0:
-                signal['action'] = 'SELL'
-                signal['confidence'] = min(abs(total_score) * 10, 95)
-            
             return signal
         except Exception as e:
             logger.error(f"Error generating signal: {e}")
+            # Default to SELL if error (safer than BUY)
             return {
-                'action': 'HOLD',
-                'confidence': 0,
+                'action': 'SELL',
+                'confidence': 50,
                 'trend_score': 0,
                 'momentum_score': 0,
                 'volume_score': 0,
@@ -243,10 +261,11 @@ class BitgetFuturesBot:
             return 0
     
     def calculate_position_size(self, price):
-        """Calculate position size"""
+        """Calculate position size with leverage"""
         try:
             balance = self.get_account_balance()
-            position_value = balance * (self.risk_percentage / 100)
+            # Account for leverage in position size
+            position_value = balance * (self.risk_percentage / 100) * self.leverage
             position_size = position_value / price
             return round(position_size, 4)
         except Exception as e:
@@ -254,7 +273,7 @@ class BitgetFuturesBot:
             return 0
     
     def open_position(self, signal):
-        """Open position with error handling"""
+        """Open position with error handling - 1% TP, 10% SL"""
         try:
             size = self.calculate_position_size(signal['price'])
             
@@ -268,13 +287,13 @@ class BitgetFuturesBot:
                 order = self.exchange.create_market_sell_order(self.symbol, size)
                 side = 'short'
             
-            # Calculate SL and TP prices
+            # Calculate TP and SL prices (1% TP, 10% SL)
             entry_price = signal['price']
             if side == 'long':
-                tp_price = entry_price * 1.02  # 2% TP
+                tp_price = entry_price * 1.01  # 1% TP
                 sl_price = entry_price * 0.90  # 10% SL
             else:
-                tp_price = entry_price * 0.98  # 2% TP
+                tp_price = entry_price * 0.99  # 1% TP
                 sl_price = entry_price * 1.10  # 10% SL
             
             self.position = {
@@ -287,8 +306,10 @@ class BitgetFuturesBot:
                 'signal': signal
             }
             
-            logger.info(f"Opened {side} position: {size} @ ${entry_price:.2f}")
-            return True, f"✅ Opened {side.upper()} position\nSize: {size}\nEntry: ${entry_price:.2f}\nTP: ${tp_price:.2f} (+2%)\nSL: ${sl_price:.2f} (-10%)"
+            logger.info(f"✅ Opened {side.upper()} position: {size} @ ${entry_price:.2f} | {self.leverage}x leverage")
+            logger.info(f"   TP: ${tp_price:.2f} (+1%) | SL: ${sl_price:.2f} (-10%)")
+            
+            return True, f"✅ Opened {side.upper()} position\nSize: {size}\nEntry: ${entry_price:.2f}\nLeverage: {self.leverage}x\nTP: ${tp_price:.2f} (+1%)\nSL: ${sl_price:.2f} (-10%)"
             
         except Exception as e:
             error_msg = f"Error opening position: {e}"
@@ -311,7 +332,7 @@ class BitgetFuturesBot:
                 order = self.exchange.create_market_buy_order(self.symbol, size)
                 pnl = (self.position['entry_price'] - current_price) * size
             
-            pnl_pct = (pnl / (self.position['entry_price'] * size)) * 100
+            pnl_pct = (pnl / (self.position['entry_price'] * size / self.leverage)) * 100
             self.total_profit += pnl
             
             trade_record = {
@@ -319,6 +340,7 @@ class BitgetFuturesBot:
                 'entry_price': self.position['entry_price'],
                 'exit_price': current_price,
                 'size': size,
+                'leverage': self.leverage,
                 'pnl': pnl,
                 'pnl_pct': pnl_pct,
                 'entry_time': self.position['entry_time'].strftime('%Y-%m-%d %H:%M:%S'),
@@ -327,7 +349,10 @@ class BitgetFuturesBot:
             }
             
             self.trades_history.append(trade_record)
-            logger.info(f"Closed {self.position['side']} position: P&L ${pnl:.2f} ({pnl_pct:+.2f}%)")
+            logger.info(f"🔒 Closed {self.position['side'].upper()} position")
+            logger.info(f"   Entry: ${self.position['entry_price']:.2f} | Exit: ${current_price:.2f}")
+            logger.info(f"   P&L: ${pnl:.2f} ({pnl_pct:+.2f}%) | Reason: {reason}")
+            logger.info(f"   Total Profit: ${self.total_profit:.2f}")
             
             self.position = None
             return True, f"🔒 Position Closed\nP&L: ${pnl:.2f} ({pnl_pct:+.2f}%)\nReason: {reason}"
@@ -339,7 +364,7 @@ class BitgetFuturesBot:
             return False, f"❌ {error_msg}"
     
     def check_exit_conditions(self, df, current_price):
-        """Check TP and SL conditions"""
+        """Check TP (1%) and SL (10%) conditions"""
         try:
             if not self.position:
                 return False, ""
@@ -353,23 +378,23 @@ class BitgetFuturesBot:
             if side == 'long':
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 
-                # Check TP
+                # Check TP (1%)
                 if current_price >= tp_price:
-                    return True, f"Take Profit ({pnl_pct:.2f}%)"
+                    return True, f"Take Profit 1% ({pnl_pct:.2f}%)"
                 
-                # Check SL
+                # Check SL (10%)
                 if current_price <= sl_price:
-                    return True, f"Stop Loss ({pnl_pct:.2f}%)"
+                    return True, f"Stop Loss -10% ({pnl_pct:.2f}%)"
             else:
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
                 
-                # Check TP
+                # Check TP (1%)
                 if current_price <= tp_price:
-                    return True, f"Take Profit ({pnl_pct:.2f}%)"
+                    return True, f"Take Profit 1% ({pnl_pct:.2f}%)"
                 
-                # Check SL
+                # Check SL (10%)
                 if current_price >= sl_price:
-                    return True, f"Stop Loss ({pnl_pct:.2f}%)"
+                    return True, f"Stop Loss -10% ({pnl_pct:.2f}%)"
             
             return False, f"Holding ({pnl_pct:+.2f}%)"
             
@@ -403,7 +428,7 @@ app.layout = dbc.Container([
         dbc.Col([
             html.H1("🤖 Bitget Futures Trading Bot", 
                    style={'color': PRIMARY_COLOR, 'textAlign': 'center', 'marginTop': '20px'}),
-            html.H5("Automated Trading with 2% TP & 10% SL", 
+            html.H5("10x Leverage • 1% TP • 10% SL • Always Trading Mode", 
                    style={'color': TEXT_COLOR, 'textAlign': 'center', 'marginBottom': '20px'})
         ])
     ]),
@@ -469,7 +494,9 @@ app.layout = dbc.Container([
                         dbc.Col([
                             dbc.Label("Strategy", style={'color': TEXT_COLOR}),
                             html.Div([
-                                html.Small("TP: 2% | SL: 10%", 
+                                html.Small("10x Leverage", 
+                                         style={'color': PRIMARY_COLOR, 'fontWeight': 'bold', 'display': 'block'}),
+                                html.Small("TP: 1% | SL: 10%", 
                                          style={'color': SUCCESS_COLOR, 'fontWeight': 'bold'})
                             ])
                         ], width=3),
@@ -526,7 +553,7 @@ app.layout = dbc.Container([
             dbc.Card([
                 dbc.CardBody([
                     html.H6("📊 Signal", style={'color': TEXT_COLOR}),
-                    html.H3(id='signal', children='HOLD', 
+                    html.H3(id='signal', children='WAITING', 
                            style={'color': TEXT_COLOR})
                 ])
             ], style={'backgroundColor': CARD_BG})
@@ -567,7 +594,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader(html.H5("🎯 Active Position", style={'color': PRIMARY_COLOR})),
+                dbc.CardHeader(html.H5("🎯 Active Position (10x Leverage)", style={'color': PRIMARY_COLOR})),
                 dbc.CardBody(id='position-info')
             ], style={'backgroundColor': CARD_BG})
         ], width=12)
@@ -619,14 +646,14 @@ def control_bot(start_clicks, stop_clicks, api_key, api_secret, passphrase,
             return current_state, dbc.Alert("❌ Please enter all API credentials", color="danger"), True
         
         try:
-            # Initialize bot
-            bot_instance = BitgetFuturesBot(api_key, api_secret, passphrase, symbol, risk_pct, margin_mode)
+            # Initialize bot with 10x leverage
+            bot_instance = BitgetFuturesBot(api_key, api_secret, passphrase, symbol, risk_pct, margin_mode, leverage=10)
             bot_instance.is_running = True
             
             return {
                 'running': True,
                 'initialized': True
-            }, dbc.Alert(f"✅ Bot started! Trading {symbol} with {risk_pct}% risk ({margin_mode} margin)", 
+            }, dbc.Alert(f"✅ Bot started! Trading {symbol} with {risk_pct}% risk, 10x leverage, {margin_mode} margin | TP: 1% | SL: 10%", 
                         color="success"), False
             
         except Exception as e:
@@ -671,7 +698,7 @@ def update_dashboard(n_intervals, bot_state):
             xaxis=dict(showgrid=False),
             yaxis=dict(showgrid=False)
         )
-        return '$0.00', '$0.00', '$0.00', 'HOLD', '0', '0%', empty_fig, "No active position", "No trades yet"
+        return '$0.00', '$0.00', '$0.00', 'WAITING', '0', '0%', empty_fig, "No active position", "No trades yet"
     
     try:
         # Fetch data
@@ -698,12 +725,13 @@ def update_dashboard(n_intervals, bot_state):
                        f"Trend: {signal['trend_score']} | Momentum: {signal['momentum_score']} | "
                        f"Volume: {signal['volume_score']} | Total: {signal['total_score']}")
             
-            if signal['action'] in ['BUY', 'SELL'] and signal['confidence'] >= 65:
-                logger.info(f"✅ Entry conditions met! Attempting to open {signal['action']} position...")
-                success, message = bot_instance.open_position(signal)
-                logger.info(f"Open result: Success={success} | {message}")
-            else:
-                logger.info(f"⏸️ No entry: Signal={signal['action']}, Confidence={signal['confidence']}% (need 30%+)")
+            # ALWAYS trade - no minimum confidence requirement
+            logger.info(f"🚀 Opening {signal['action']} position (always trading mode with 10x leverage)...")
+            success, message = bot_instance.open_position(signal)
+            logger.info(f"Open result: Success={success} | {message}")
+            
+            if not success:
+                logger.error(f"Failed to open position: {message}")
         
         # Create chart
         fig = make_subplots(
@@ -722,7 +750,9 @@ def update_dashboard(n_intervals, bot_state):
                 high=df['high'],
                 low=df['low'],
                 close=df['close'],
-                name='Price'
+                name='Price',
+                increasing_line_color='#00ff00',
+                decreasing_line_color='#ff0000'
             ),
             row=1, col=1
         )
@@ -754,7 +784,7 @@ def update_dashboard(n_intervals, bot_state):
                     x=[entry_time],
                     y=[entry_price],
                     mode='markers',
-                    marker=dict(size=12, color=color, symbol='star'),
+                    marker=dict(size=15, color=color, symbol='star'),
                     name=f"Entry ({bot_instance.position['side'].upper()})",
                     showlegend=True
                 ),
@@ -763,9 +793,11 @@ def update_dashboard(n_intervals, bot_state):
             
             # TP and SL lines
             fig.add_hline(y=tp_price, line_dash="dash", line_color="green", 
-                         annotation_text=f"TP: ${tp_price:.2f}", row=1, col=1)
+                         annotation_text=f"TP 1%: ${tp_price:.2f}", 
+                         annotation_position="right", row=1, col=1)
             fig.add_hline(y=sl_price, line_dash="dash", line_color="red", 
-                         annotation_text=f"SL: ${sl_price:.2f}", row=1, col=1)
+                         annotation_text=f"SL -10%: ${sl_price:.2f}", 
+                         annotation_position="right", row=1, col=1)
         
         # RSI
         fig.add_trace(
@@ -775,6 +807,7 @@ def update_dashboard(n_intervals, bot_state):
         )
         fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
+        fig.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.3, row=2, col=1)
         
         # MACD
         fig.add_trace(
@@ -785,6 +818,14 @@ def update_dashboard(n_intervals, bot_state):
         fig.add_trace(
             go.Scatter(x=df['timestamp'], y=df['macd_signal'], name='Signal', 
                       line=dict(color='red', width=1)),
+            row=3, col=1
+        )
+        
+        # MACD Histogram
+        colors = ['green' if val >= 0 else 'red' for val in df['macd_diff']]
+        fig.add_trace(
+            go.Bar(x=df['timestamp'], y=df['macd_diff'], 
+                  name='Histogram', marker_color=colors, opacity=0.5),
             row=3, col=1
         )
         
@@ -805,7 +846,8 @@ def update_dashboard(n_intervals, bot_state):
         
         # Position info
         position_info = html.Div([
-            html.P("No active position", style={'color': TEXT_COLOR, 'textAlign': 'center'})
+            html.P("No active position - Next trade opening shortly...", 
+                  style={'color': TEXT_COLOR, 'textAlign': 'center'})
         ])
         
         if bot_instance.position:
@@ -814,49 +856,60 @@ def update_dashboard(n_intervals, bot_state):
             entry_price = pos['entry_price']
             
             if side == 'long':
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100 * bot_instance.leverage
                 pnl_usd = (current_price - entry_price) * pos['size']
             else:
-                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                pnl_pct = ((entry_price - current_price) / entry_price) * 100 * bot_instance.leverage
                 pnl_usd = (entry_price - current_price) * pos['size']
             
             pnl_color = SUCCESS_COLOR if pnl_usd > 0 else DANGER_COLOR
             side_color = SUCCESS_COLOR if side == 'long' else DANGER_COLOR
             
-            position_info = dbc.Row([
-                dbc.Col([
-                    html.H6("Side", style={'color': TEXT_COLOR}),
-                    html.H4(side.upper(), style={'color': side_color})
-                ], width=2),
-                dbc.Col([
-                    html.H6("Entry Price", style={'color': TEXT_COLOR}),
-                    html.H4(f"${entry_price:.2f}", style={'color': TEXT_COLOR})
-                ], width=2),
-                dbc.Col([
-                    html.H6("Current Price", style={'color': TEXT_COLOR}),
-                    html.H4(f"${current_price:.2f}", style={'color': TEXT_COLOR})
-                ], width=2),
-                dbc.Col([
-                    html.H6("Size", style={'color': TEXT_COLOR}),
-                    html.H4(f"{pos['size']}", style={'color': TEXT_COLOR})
-                ], width=2),
-                dbc.Col([
-                    html.H6("Take Profit", style={'color': TEXT_COLOR}),
-                    html.H4(f"${pos['tp_price']:.2f}", style={'color': SUCCESS_COLOR})
-                ], width=2),
-                dbc.Col([
-                    html.H6("Stop Loss", style={'color': TEXT_COLOR}),
-                    html.H4(f"${pos['sl_price']:.2f}", style={'color': DANGER_COLOR})
-                ], width=2),
-            ], className='mb-3') + dbc.Row([
-                dbc.Col([
-                    html.H6("P&L", style={'color': TEXT_COLOR}),
-                    html.H3(f"${pnl_usd:.2f} ({pnl_pct:+.2f}%)", style={'color': pnl_color})
-                ], width=12, style={'textAlign': 'center'})
+            position_info = html.Div([
+                dbc.Row([
+                    dbc.Col([
+                        html.H6("Side", style={'color': TEXT_COLOR}),
+                        html.H4(side.upper(), style={'color': side_color, 'fontWeight': 'bold'})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Entry Price", style={'color': TEXT_COLOR}),
+                        html.H4(f"${entry_price:.2f}", style={'color': TEXT_COLOR})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Current Price", style={'color': TEXT_COLOR}),
+                        html.H4(f"${current_price:.2f}", style={'color': TEXT_COLOR})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Size", style={'color': TEXT_COLOR}),
+                        html.H4(f"{pos['size']}", style={'color': TEXT_COLOR})
+                    ], width=1),
+                    dbc.Col([
+                        html.H6("Leverage", style={'color': TEXT_COLOR}),
+                        html.H4(f"{bot_instance.leverage}x", style={'color': PRIMARY_COLOR, 'fontWeight': 'bold'})
+                    ], width=1),
+                    dbc.Col([
+                        html.H6("Take Profit", style={'color': TEXT_COLOR}),
+                        html.H4(f"${pos['tp_price']:.2f}", style={'color': SUCCESS_COLOR})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Stop Loss", style={'color': TEXT_COLOR}),
+                        html.H4(f"${pos['sl_price']:.2f}", style={'color': DANGER_COLOR})
+                    ], width=2),
+                ], className='mb-3'),
+                dbc.Row([
+                    dbc.Col([
+                        html.H6("Unrealized P&L", style={'color': TEXT_COLOR, 'textAlign': 'center'}),
+                        html.H2(f"${pnl_usd:.2f}", 
+                               style={'color': pnl_color, 'fontWeight': 'bold', 'textAlign': 'center'}),
+                        html.H4(f"({pnl_pct:+.2f}%)", 
+                               style={'color': pnl_color, 'textAlign': 'center'})
+                    ], width=12)
+                ])
             ])
         
         # Trade history
-        trade_history = html.P("No trades yet", style={'color': TEXT_COLOR, 'textAlign': 'center'})
+        trade_history = html.P("No trades yet - First trade will open shortly...", 
+                              style={'color': TEXT_COLOR, 'textAlign': 'center'})
         
         if bot_instance.trades_history:
             trades_df = pd.DataFrame(bot_instance.trades_history)
@@ -864,28 +917,50 @@ def update_dashboard(n_intervals, bot_state):
             # Statistics
             total_trades = len(trades_df)
             winning_trades = len(trades_df[trades_df['pnl'] > 0])
+            losing_trades = len(trades_df[trades_df['pnl'] <= 0])
             win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+            avg_win = trades_df[trades_df['pnl'] > 0]['pnl'].mean() if winning_trades > 0 else 0
+            avg_loss = trades_df[trades_df['pnl'] <= 0]['pnl'].mean() if losing_trades > 0 else 0
             
             # Recent trades table
             display_df = trades_df[['entry_time', 'side', 'entry_price', 'exit_price', 
-                                   'pnl', 'pnl_pct', 'reason']].tail(10)
+                                   'leverage', 'pnl', 'pnl_pct', 'reason']].tail(15)
+            
+            # Format numbers
+            display_df['pnl'] = display_df['pnl'].apply(lambda x: f"${x:.2f}")
+            display_df['pnl_pct'] = display_df['pnl_pct'].apply(lambda x: f"{x:+.2f}%")
+            display_df['entry_price'] = display_df['entry_price'].apply(lambda x: f"${x:.2f}")
+            display_df['exit_price'] = display_df['exit_price'].apply(lambda x: f"${x:.2f}")
             
             trade_history = html.Div([
                 dbc.Row([
                     dbc.Col([
                         html.H6("Total Trades", style={'color': TEXT_COLOR}),
-                        html.H4(str(total_trades), style={'color': PRIMARY_COLOR})
-                    ], width=4),
+                        html.H4(str(total_trades), style={'color': PRIMARY_COLOR, 'fontWeight': 'bold'})
+                    ], width=2),
                     dbc.Col([
                         html.H6("Winners", style={'color': TEXT_COLOR}),
-                        html.H4(str(winning_trades), style={'color': SUCCESS_COLOR})
-                    ], width=4),
+                        html.H4(str(winning_trades), style={'color': SUCCESS_COLOR, 'fontWeight': 'bold'})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Losers", style={'color': TEXT_COLOR}),
+                        html.H4(str(losing_trades), style={'color': DANGER_COLOR, 'fontWeight': 'bold'})
+                    ], width=2),
                     dbc.Col([
                         html.H6("Win Rate", style={'color': TEXT_COLOR}),
-                        html.H4(f"{win_rate:.1f}%", style={'color': PRIMARY_COLOR})
-                    ], width=4),
+                        html.H4(f"{win_rate:.1f}%", style={'color': PRIMARY_COLOR, 'fontWeight': 'bold'})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Avg Win", style={'color': TEXT_COLOR}),
+                        html.H4(f"${avg_win:.2f}", style={'color': SUCCESS_COLOR})
+                    ], width=2),
+                    dbc.Col([
+                        html.H6("Avg Loss", style={'color': TEXT_COLOR}),
+                        html.H4(f"${avg_loss:.2f}", style={'color': DANGER_COLOR})
+                    ], width=2),
                 ], className='mb-3'),
                 
+                html.H6("Recent Trades", style={'color': TEXT_COLOR, 'marginTop': '20px'}),
                 dash_table.DataTable(
                     data=display_df.to_dict('records'),
                     columns=[{'name': i, 'id': i} for i in display_df.columns],
@@ -895,7 +970,8 @@ def update_dashboard(n_intervals, bot_state):
                         'color': TEXT_COLOR,
                         'border': '1px solid #444',
                         'textAlign': 'left',
-                        'padding': '10px'
+                        'padding': '10px',
+                        'fontSize': '12px'
                     },
                     style_header={
                         'backgroundColor': DARK_BG,
@@ -905,19 +981,24 @@ def update_dashboard(n_intervals, bot_state):
                     },
                     style_data_conditional=[
                         {
-                            'if': {'filter_query': '{pnl} > 0'},
-                            'backgroundColor': 'rgba(0, 255, 0, 0.1)',
+                            'if': {
+                                'filter_query': '{pnl} contains "$-" || {pnl} contains "$0.00"',
+                            },
+                            'backgroundColor': 'rgba(255, 0, 0, 0.2)',
                         },
                         {
-                            'if': {'filter_query': '{pnl} < 0'},
-                            'backgroundColor': 'rgba(255, 0, 0, 0.1)',
+                            'if': {
+                                'filter_query': '{pnl} contains "$" && {pnl} does not contain "$-" && {pnl} does not contain "$0.00"',
+                            },
+                            'backgroundColor': 'rgba(0, 255, 0, 0.2)',
                         }
-                    ]
+                    ],
+                    page_size=15
                 )
             ])
         
         # Signal display
-        signal_color = SUCCESS_COLOR if signal['action'] == 'BUY' else DANGER_COLOR if signal['action'] == 'SELL' else TEXT_COLOR
+        signal_color = SUCCESS_COLOR if signal['action'] == 'BUY' else DANGER_COLOR
         signal_text = f"{signal['action']} ({signal['confidence']}%)"
         
         # Calculate win rate
@@ -927,11 +1008,14 @@ def update_dashboard(n_intervals, bot_state):
             winners = len(trades[trades['pnl'] > 0])
             win_rate_text = f"{(winners/len(trades)*100):.1f}%"
         
+        # Format total profit color
+        profit_color = SUCCESS_COLOR if bot_instance.total_profit > 0 else DANGER_COLOR if bot_instance.total_profit < 0 else TEXT_COLOR
+        
         return (
             f"${current_price:.2f}",
-            f"${bot_instance.total_profit:.2f}",
+            html.Span(f"${bot_instance.total_profit:.2f}", style={'color': profit_color}),
             f"${balance:.2f}",
-            html.Span(signal_text, style={'color': signal_color}),
+            html.Span(signal_text, style={'color': signal_color, 'fontWeight': 'bold'}),
             str(len(bot_instance.trades_history)),
             win_rate_text,
             fig,
@@ -947,7 +1031,8 @@ def update_dashboard(n_intervals, bot_state):
         empty_fig.update_layout(
             template='plotly_dark',
             paper_bgcolor=CARD_BG,
-            plot_bgcolor=CARD_BG
+            plot_bgcolor=CARD_BG,
+            title="Error loading chart"
         )
         
         error_msg = html.Div([
