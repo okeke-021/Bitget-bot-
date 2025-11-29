@@ -1,41 +1,59 @@
-# Bitget Futures Trading Bot
+Bitget Futures Trading Bot - Dash Dashboard
 
-Automated 24/7 cryptocurrency futures trading bot.
+Professional trading bot with dark UI dashboard for cryptocurrency futures.
 
-## Setup
-1. Deploy to Railway
-2. Set environment variables
-3. Monitor via logs
+## Features
 
-## Environment Variables Required
-- BITGET_API_KEY
-- BITGET_API_SECRET
-- BITGET_PASSPHRASE
-- TRADING_SYMBOL (default: BTC/USDT:USDT)
-- RISK_PERCENTAGE (default: 10)
-```
+### Trading Strategy
+- **Take Profit:** 2% target
+- **Stop Loss:** 10% protection
+- **Position Modes:** Cross or Isolated margin
+- **Supported Pairs:** BTC, ETH, SOL, BNB, XRP, TON
 
----
+### Dashboard Features
+- 🎨 Dark theme UI
+- 📊 Real-time price charts
+- 📈 Technical indicators (RSI, MACD, Bollinger Bands)
+- 💰 Live P&L tracking
+- 📋 Trade history with statistics
+- 🎯 TP/SL visualization on charts
 
-### **Step 3: Initialize Git & Push to GitHub**
+### Technical Analysis
+- SMA 20 & 50
+- EMA 12 & 26
+- MACD with histogram
+- RSI (14 period)
+- Stochastic Oscillator
+- Bollinger Bands
+- ATR volatility
+- Volume analysis with OBV
 
-```bash
-# Initialize git
-git init
+## Deployment
 
-# Add all files
-git add .
+Deploy to Render in minutes:
 
-# Commit
-git commit -m "Initial commit: Bitget futures trading bot"
+1. Push code to GitHub
+2. Connect to Render
+3. Deploy as Web Service
+4. Access dashboard URL
+5. Enter API credentials
+6. Start trading!
 
-# Create GitHub repo and push (using GitHub CLI)
-gh auth login
-gh repo create bitget-trading-bot --public --source=. --remote=origin --push
+## Configuration
 
-# OR manually:
-# 1. Create repo on github.com
-# 2. Then run:
-git remote add origin https://github.com/YOUR_USERNAME/bitget-trading-bot.git
-git branch -M main
-git push -u origin main
+### API Setup
+1. Create Bitget API key
+2. Enable futures trading only
+3. Disable withdrawals
+4. Set permissions to minimum required
+
+### Risk Management
+- Start with 1-5% risk per trade
+- Use Cross margin for lower liquidation risk
+- Use Isolated margin for position-level risk control
+- Monitor positions regularly
+
+## Disclaimer
+
+High-risk trading software. Use at your own risk.
+Only trade with funds you can afford to lose.
